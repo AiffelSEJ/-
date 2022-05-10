@@ -1,0 +1,231 @@
+#코드
+from google.colab import drive
+drive.mount('/content/drive')
+
+import pandas as pd
+import numpy as np
+import re
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import accuracy_score, log_loss
+from sklearn.model_selection import StratifiedKFold
+
+import tensorflow as tf
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, Embedding, LSTM, Dropout, Bidirectional
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.utils import plot_model, to_categorical
+from tensorflow.keras.optimizers import Adam
+
+from keras.utils import np_utils
+
+import warnings 
+warnings.filterwarnings(action='ignore')
+
+
+1.NLP Preprocessing
+1-1. 데이터 불러오기
+
+PATH = '/content/drive/MyDrive/news/'
+
+train = pd.read_csv(PATH + "train_data.csv")
+test = pd.read_csv(PATH + "test_data.csv")
+submission = pd.read_csv(PATH + "sample_submission.csv")
+
+train
+
+1-3. 데이터 시각화
+
+# 작가별 분포도 확인 
+train.groupby(train.topic_idx).size().reset_index(name="counts").plot.bar(x='topic_idx',title="Samples per each class (Training set)")
+
+# 문장 길이 분포도 확인
+train['doc_len'] = train.title.apply(lambda words: len(words.split()))
+
+def plot_doc_lengths(dataframe):
+    mean_seq_len = np.round(dataframe.doc_len.mean()).astype(int)
+    sns.distplot(tuple(dataframe.doc_len), hist=True, kde=True, label='Document lengths')
+    plt.axvline(x=mean_seq_len, color='k', linestyle='--', label=f'Sequence length mean:{mean_seq_len}')
+    plt.title('Document lengths')
+    plt.legend()
+    plt.show()
+    print(f" 가장 긴 문장은 {train['doc_len'].max()} 개의 단어를, 가장 짧은 문장은 {train['doc_len'].min()} 개의 단어를 가지고 있습니다.")
+
+plot_doc_lengths(train)
+
+
+2.Vectorization
+2.1 Tokenization
+
+# 먼저 train 데이터와 test 데이터 인덱스 없이 배열로 만들기
+X_train = np.array([x for x in train['title']])
+X_test = np.array([x for x in test['title']])
+Y_train = np.array([x for x in train['topic_idx']])
+
+print(X_train.shape)
+print(X_test.shape)
+print(Y_train.shape)
+
+
+print(X_train)
+print(X_test)
+print(Y_train)
+
+# Tokenizer
+from keras.preprocessing.text import Tokenizer
+vocab_size = 2000  
+
+tokenizer = Tokenizer(num_words = vocab_size)  
+  # Tokenizer 는 데이터에 출현하는 모든 단어의 개수를 세고 빈도 수로 정렬해서 
+  # num_words 에 지정된 만큼만 숫자로 반환하고, 나머지는 0 으로 반환합니다                 
+tokenizer.fit_on_texts(X_train) # Tokenizer 에 데이터 실제로 입력
+sequences_train = tokenizer.texts_to_sequences(X_train)    # 문장 내 모든 단어를 시퀀스 번호로 변환
+sequences_test = tokenizer.texts_to_sequences(X_test)      # 문장 내 모든 단어를 시퀀스 번호로 변환
+
+print(len(sequences_train), len(sequences_test))
+
+
+3.Embediing
+
+# 변환된 시퀀스 번호를 이용해 단어 임베딩 벡터 생성
+word_index = tokenizer.word_index
+
+# 독립변수 데이터 전처리
+  ## 문장의 길이기 제각각이기 때문에 벡터 크기 다 다름
+  ## 그러므로 최대 시퀀스 길이 크기(211) 만큼 넉넉하게 늘리고
+  ## 패딩(padding) 작업을 통해 나머지 빈 공간을 0으로 채움
+max_length = 14    # 위에서 그래프 확인 후 정함
+padding_type='post'
+
+train_x = pad_sequences(sequences_train, padding='post', maxlen=max_length)
+test_x = pad_sequences(sequences_test, padding=padding_type, maxlen=max_length)
+
+print(train_x.shape, test_x.shape)
+
+# 종속변수 데이터 전처리
+train_y = np_utils.to_categorical(Y_train) # Y_train 에 원-핫 인코딩
+print(train_y)
+print(train_y.shape)
+
+
+4.Modeling
+
+4.3 양방향 LSTM
+
+
+#파라미터 설정
+vocab_size = 2000 # 제일 많이 사용하는 사이즈
+embedding_dim = 200  
+max_length = 14    # 위에서 그래프 확인 후 정함
+padding_type='post'
+#oov_tok = "<OOV>"
+
+# 양방향 LSTM 레이어를 사용한 모델 (model3) 정의
+model3 = Sequential([Embedding(vocab_size, embedding_dim, input_length =max_length),
+        tf.keras.layers.Bidirectional(LSTM(units = 64, return_sequences = True)),
+        tf.keras.layers.Bidirectional(LSTM(units = 64, return_sequences = True)),
+        tf.keras.layers.Bidirectional(LSTM(units = 64)),
+        Dense(7, activation='softmax')    # 결과값이 0~4 이므로 Dense(5)
+    ])
+    
+model3.compile(loss= 'categorical_crossentropy', #여러개 정답 중 하나 맞추는 문제이므로 손실 함수는 categorical_crossentropy
+              optimizer= 'adam',
+              metrics = ['accuracy']) 
+model3.summary()
+
+# 모델 실행해보기
+history = model3.fit(train_x, train_y, epochs=50, batch_size=100, validation_split= 0.2) 
+  # 양방향 LSTM 레이어에서는 batch size 를 100으로 잡고 50회 학습 해보았다.
+  
+  # 모델 학습 결과 확인
+plt.figure(figsize=(12, 4))
+
+plt.subplot(1, 2, 1)
+plt.title('loss of Bidirectional LSTM (model3) ', fontsize= 15)
+plt.plot(history.history['loss'], 'b-', label='loss')
+plt.plot(history.history['val_loss'],'r--', label='val_loss')
+plt.xlabel('Epoch')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.title('accuracy of Bidirectional LSTM (model3) ', fontsize= 15)
+plt.plot(history.history['accuracy'], 'g-', label='accuracy')
+plt.plot(history.history['val_accuracy'],'k--', label='val_accuracy')
+plt.xlabel('Epoch')
+plt.legend()
+plt.show
+
+
+4.4 교차 검증 적용
+계층 교차검증(StratifiedKFold) 적용하고 모델 일반화
+
+# 계층 교차 검증
+n_fold = 5  
+seed = 42
+
+cv = StratifiedKFold(n_splits = n_fold, shuffle=True, random_state=seed)
+
+for i, (i_trn, i_val) in enumerate(cv.split(train_x, Y_train), 1):
+    print(f'training model for CV #{i}')
+
+    model3.fit(train_x[i_trn], 
+            to_categorical(Y_train[i_trn]),
+            validation_data=(train_x[i_val], to_categorical(Y_train[i_val])),
+            epochs=10,
+            batch_size=512)
+      
+      
+# 계층 교차 검증
+n_fold = 5  
+seed = 42
+
+cv = StratifiedKFold(n_splits = n_fold, shuffle=True, random_state=seed)
+
+# 테스트데이터의 예측값 담을 곳 생성
+test_y = np.zeros((test_x.shape[0], 7))
+
+# 조기 종료 옵션 추가
+es = EarlyStopping(monitor='val_loss', min_delta=0.001, patience=3,
+                   verbose=1, mode='min', baseline=None, restore_best_weights=True)
+
+for i, (i_trn, i_val) in enumerate(cv.split(train_x, Y_train), 1):
+    print(f'training model for CV #{i}')
+
+    model3.fit(train_x[i_trn], 
+            to_categorical(Y_train[i_trn]),
+            validation_data=(train_x[i_val], to_categorical(Y_train[i_val])),
+            epochs=10,
+            batch_size=512,
+            callbacks=[es])     # 조기 종료 옵션
+                      
+    test_y += model3.predict(test_x) / n_fold    # 나온 예측값들을 교차 검증 횟수로 나눈다            
+            
+ 
+ # 테스트 데이터의 예측값 확인
+test_y
+
+topic = []
+for i in range(len(test_y)):
+    topic.append(np.argmax(test_y[i]))
+    
+submission
+
+# sample_submission 에 대입
+submission['topic_idx'] = topic
+submission
+
+submission.to_csv(PATH + 'LSTM.csv',index = False)
+
+
+
+
+    
+
+
+
+
+
